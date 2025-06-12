@@ -4,6 +4,8 @@ namespace App\Console\Commands\Base;
 
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
+use Illuminate\Http\Client\Response;
 
 abstract class BaseImportCommand extends Command
 {
@@ -48,18 +50,27 @@ abstract class BaseImportCommand extends Command
     protected function importPage($baseUrl, $key, $dateFrom, $page)
     {
         $this->info("Импортируем страницу {$page}...");
+        Log::info("Импортируем страницу {$page}...");
+        
+        $response = $this->sendRequestWithRetries(
+            "{$baseUrl}{$this->getApiPath()}",
+            [
+                'dateFrom' => $dateFrom,
+                'dateTo' => '9999-01-01',
+                'page' => $page,
+                'limit' => 500,
+                'key' => $key
+            ]
+        );
 
-        $response = Http::get("{$baseUrl}{$this->getApiPath()}", [
-            'dateFrom' => $dateFrom,
-            'dateTo' => '9999-01-01',
-            'page' => $page,
-            'limit' => 500,
-            'key' => $key
-        ]);
+        if (!$response) {
+            return;
+        }
 
         if (!$response->successful()) {
             $this->error("Ошибка при запросе страницы {$page}: HTTP " . $response->status());
             $this->error("Ответ API: " . $response->body());
+            Log::error("Ошибка при запросе страницы {$page}: HTTP " . $response->status());
             return;
         }
 
@@ -67,8 +78,10 @@ abstract class BaseImportCommand extends Command
 
         if (empty($data)) {
             $this->info("Страница {$page} пустая.");
+            Log::warning("Страница {$page} пустая.");
         } else {
             $this->info("Импортировано " . count($data) . " записей с страницы {$page}.");
+            Log::info("Импортируем страницу {$page}...");
         }
 
         $batch = [];
@@ -96,5 +109,33 @@ abstract class BaseImportCommand extends Command
         foreach (array_chunk($batch, $chunkSize) as $chunk) {
             $modelClass::insert($chunk);
         }
+    }
+
+    protected function sendRequestWithRetries(string $url, array $params, int $maxRetries = 3, int $retryDelay = 10): ?Response
+    {
+        for ($attempt = 1; $attempt <= $maxRetries; $attempt++) {
+            $this->info("Попытка {$attempt} запроса к {$url} (page={$params['page']})");
+            Log::info("Попытка {$attempt} запроса к {$url} (page={$params['page']})");
+
+            $response = Http::get($url, $params);
+
+            if ($response->successful()) {
+                return $response;
+            }
+
+            $this->error("Ошибка HTTP {$response->status()} при попытке {$attempt} (page={$params['page']})");
+            Log::error("Ошибка HTTP {$response->status()} при попытке {$attempt} (page={$params['page']})");
+
+            if ($attempt < $maxRetries) {
+                $this->info("Ждём {$retryDelay} секунд перед повтором...");
+                Log::info("Ждём {$retryDelay} секунд перед повтором...");
+                sleep($retryDelay);
+            }
+        }
+
+        $this->error("Максимальное количество попыток ({$maxRetries}) исчерпано. Пропускаем страницу {$params['page']}.");
+        Log::error("Максимальное количество попыток ({$maxRetries}) исчерпано. Пропускаем страницу {$params['page']}.");
+
+        return null;
     }
 }
